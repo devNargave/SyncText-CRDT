@@ -1,0 +1,15 @@
+# Compiled binaries
+*.o
+*.out
+SyncText
+editor
+display
+clear_users
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# VS Code
+.vscode/
