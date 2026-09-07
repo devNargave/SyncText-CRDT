@@ -1,62 +1,84 @@
-# SyncText - Collaborative Text Editor
+# SyncText — Collaborative Text Editor
 
-## What This Does
+A lightweight, terminal-based collaborative text editor for Linux. Multiple users on the same machine can edit their own copy of a document while SyncText automatically detects local changes, propagates them to other users, and merges incoming changes using a Last-Writer-Wins (LWW) CRDT strategy — keeping every copy converged on the same final content.
 
-- Multiple people can run the editor on the same machine and edit their own copy of a document. The system automatically:
-- Detects what you changed
-- Sends your changes to others
-- Receives changes from others
-- Merges everything using Last-Writer-Wins conflict resolution
-- Keeps all documents synchronized
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [How It Works](#how-it-works)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+
+## Features
+
+- **Automatic change detection** — polls the document for changes and diffs against the previous version to identify exactly which lines and columns changed.
+- **Peer-to-peer synchronization** — changes are broadcast to and received from other active users via POSIX message queues.
+- **Conflict resolution** — concurrent edits to overlapping regions are resolved deterministically using timestamp-based Last-Writer-Wins semantics, with user ID as a tiebreaker.
+- **Multi-user support** — supports two or more concurrent editors, each maintaining an independently synchronized copy of the document.
+- **Lock-free coordination** — uses atomic variables to coordinate between the monitoring and listener threads without risk of deadlock.
+
+## Architecture
+
+Each running instance of the editor consists of two threads:
+
+| Thread | Responsibility |
+|---|---|
+| Main | Monitors the local file, batches outgoing changes, broadcasts updates, and performs merges |
+| Listener | Continuously polls the user's message queue for incoming updates from peers |
+
+Updates are exchanged as binary `Update` structs (containing line, column range, timestamp, and user ID) over per-user POSIX message queues (`/queue_user_1`, `/queue_user_2`, etc.).
 
 ## Requirements
 
 - Linux (tested on Ubuntu 20.04+)
-- gcc compiler
-- POSIX message queues and pthreads (usually already installed)
+- GCC compiler
+- POSIX message queues and pthreads (included in most standard Linux installations)
 
-## How to Build
+## Installation
 
-one command:
+Build the project with:
+
 ```bash
 make
 ```
 
-This creates two executables:
-- `editor` - the main program
-- `clear_users` - utility to reset the user registry
+This produces two executables:
 
-If you want to rebuild from scratch:
+| Executable | Purpose |
+|---|---|
+| `editor` | Main collaborative editor program |
+| `clear_users` | Utility to reset the shared user registry |
+
+To rebuild from a clean state:
+
 ```bash
 make clean && make
 ```
 
-## How to Run
+## Usage
 
-### Basic Usage
+### Starting an editing session
 
-Open 2-3 terminal windows in this directory.
+Open two or three terminal windows in the project directory, and start one editor instance per terminal:
 
-Terminal 1:
 ```bash
+# Terminal 1
 ./editor user_1
-```
 
-Terminal 2:
-```bash
+# Terminal 2
 ./editor user_2
-```
 
-Terminal 3 (optional):
-```bash
+# Terminal 3 (optional)
 ./editor user_3
 ```
 
-Each user gets their own file: `user_1_doc.txt`, `user_2_doc.txt`, etc.
+Each user operates on their own file (`user_1_doc.txt`, `user_2_doc.txt`, etc.), and the terminal displays a live view of the document:
 
-### What You'll See
-
-Each terminal shows:
 ```
 Document: user_1_doc.txt
 Last updated: 15:30:45
@@ -69,80 +91,93 @@ Active users: user_1, user_2
 Monitoring for changes...
 ```
 
-### Editing Files
+### Editing a document
 
-Open the document in any text editor:
+Open a user's document file in any text editor and save your changes:
+
 ```bash
 nano user_1_doc.txt
 # or
 vim user_1_doc.txt
-# or use your favorite editor
 ```
 
-Make changes and save. The editor automatically detects the changes and shows them.
+The running editor process automatically detects saved changes and displays them in the terminal.
 
-After you make 5 changes, they get broadcast to other users.
-When you receive 5 changes from others, they get merged into your file.
+- Every 5 local changes are broadcast to other active users.
+- Every 5 changes received from peers trigger a merge into the local file.
 
 ## How It Works
 
-### Change Detection
-- Program checks file every 200ms using stat()
-- When file changes, reads it and compares with old version
-- Finds exactly which lines and columns changed
-- Creates Update objects with metadata (line, columns, timestamp, user_id)
+### 1. Change Detection
 
-### Broadcasting
-- Local changes accumulate in a buffer
-- After 5 changes, broadcast all of them to other users
-- Uses POSIX message queues to send binary Update structs
-- Each user has their own queue: `/queue_user_1`, `/queue_user_2`, etc.
+The file is polled every 200ms using `stat()`. When a modification is detected, the new content is compared against the prior version to determine exactly which lines and column ranges changed. Each change is recorded as an `Update` struct with line, column, timestamp, and user ID metadata.
 
-### Receiving
-- Listener thread continuously checks your message queue
-- Receives Update structs from other users
-- Stores them in a received buffer
-- After 5 received, triggers merge
+### 2. Broadcasting
 
-### Merging (CRDT)
-- Combines local and received updates
-- Detects conflicts (same line + overlapping columns)
-- Resolves conflicts: newer timestamp wins, user_id breaks ties
-- Applies winning updates to file
-- Everyone converges to same final content
+Local changes accumulate in a buffer. Once 5 changes have been recorded, they are broadcast as binary `Update` structs to all other active users via POSIX message queues.
 
-### Threading
-- Main thread: monitors file, batches updates, broadcasts, performs merge
-- Listener thread: receives updates from message queue
-- Lock-free coordination using atomic variables
-- No deadlocks possible
+### 3. Receiving
 
-## Testing the System
+A dedicated listener thread continuously polls the local message queue and stores incoming `Update` structs in a receive buffer. Once 5 updates have been received, a merge is triggered.
+
+### 4. Merging (CRDT)
+
+Local and received updates are combined. Conflicts — defined as updates to the same line with overlapping columns — are resolved by:
+
+1. Comparing timestamps; the more recent update wins.
+2. Using user ID as a tiebreaker in the event of identical timestamps.
+
+The winning updates are applied to the file, ensuring all users eventually converge on identical content.
+
+## Testing
 
 ### Test 1: Non-Conflicting Edits
-1. Start user_1 and user_2
-2. In user_1_doc.txt, edit line 0
-3. In user_2_doc.txt, edit line 2
-4. Make 5 total edits in each
-5. Watch changes appear in both terminals
 
-### Test 2: Conflicting Edits (The Interesting Part)
-1. Start user_1 and user_2
-2. Both edit line 0 at roughly the same time
-3. Make 5 edits in each
-4. System picks the most recent edit (Last-Writer-Wins)
-5. Both users end up with same content
+1. Start `user_1` and `user_2`.
+2. Edit line 0 in `user_1_doc.txt` and line 2 in `user_2_doc.txt`.
+3. Make 5 total edits in each file.
+4. Confirm changes appear in both terminals.
 
-### Test 3: Three Users
-1. Start user_1, user_2, user_3
-2. Everyone edits different lines
-3. Make changes quickly
-4. All changes propagate to everyone
-5. Documents stay synchronized
+### Test 2: Conflicting Edits
 
-## Cleanup
+1. Start `user_1` and `user_2`.
+2. Have both users edit line 0 at roughly the same time.
+3. Make 5 edits in each file.
+4. Confirm the system resolves the conflict via Last-Writer-Wins and both users converge on the same content.
 
-If things get stuck or  want to start fresh:
+### Test 3: Three Concurrent Users
+
+1. Start `user_1`, `user_2`, and `user_3`.
+2. Have each user edit a different line.
+3. Make changes in quick succession.
+4. Confirm all changes propagate and all documents remain synchronized.
+
+## Troubleshooting
+
+**`mq_open: No such file or directory`**
+The message queue filesystem is not mounted. Set it up with:
+
+```bash
+sudo mkdir -p /dev/mqueue
+sudo mount -t mqueue none /dev/mqueue
+```
+
+**`User already registered`**
+A previous instance did not exit cleanly. Reset the user registry:
+
+```bash
+./clear_users
+```
+
+**Changes not syncing**
+Confirm at least 5 changes have been made (broadcasts are batched in groups of 5), and verify both editors are running and appear in each other's "Active users" list.
+
+**File permission errors**
+Verify the `.txt` document files are writable and that you're running commands from the correct directory.
+
+### Manual Cleanup
+
+If the system becomes stuck or you want to start fresh:
 
 ```bash
 # Remove build artifacts and test files
@@ -155,37 +190,15 @@ make clean
 rm -f /dev/mqueue/queue_*
 ```
 
-## Troubleshooting
-
-### "mq_open: No such file or directory"
-The message queue filesystem might not be set up. Try:
-```bash
-sudo mkdir -p /dev/mqueue
-sudo mount -t mqueue none /dev/mqueue
-```
-
-### "User already registered"
-Another instance is running or didn't clean up. Run:
-```bash
-./clear_users
-```
-
-### Changes not syncing
-Make sure you're making at least 5 changes (that's when broadcast happens). Or check that both editors are running and showing each other in "Active users" list.
-
-### File permission errors
-Make sure the .txt files are writable and you're in the right directory.
-
-## File Structure
+## Project Structure
 
 ```
-editor.c           - Main program (file monitoring, thread management, merge coordination)
-file_utils.c       - File I/O and change detection
-user_registry.c    - Shared memory for active users
-message_queue.c    - POSIX message queue operations
-crdt_merge.c       - Conflict detection and resolution
-display.c          - Terminal display
-clear_users.c      - Utility to reset user registry
-Makefile           - Build rules
+editor.c           Main program: file monitoring, thread management, merge coordination
+file_utils.c        File I/O and change detection
+user_registry.c      Shared memory for active users
+message_queue.c      POSIX message queue operations
+crdt_merge.c         Conflict detection and resolution
+display.c            Terminal display
+clear_users.c        Utility to reset user registry
+Makefile             Build rules
 ```
-
